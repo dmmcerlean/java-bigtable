@@ -1,4 +1,5 @@
-[{
+[
+  {
   "name" : "com.google.bigtable.veneer.repackaged.io.opencensus.impl.stats.StatsComponentImpl",
   "allDeclaredConstructors" : true,
   "allPublicConstructors" : true,
