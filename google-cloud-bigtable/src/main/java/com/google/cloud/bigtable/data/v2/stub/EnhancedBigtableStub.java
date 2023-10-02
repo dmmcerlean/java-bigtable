@@ -15,6 +15,7 @@
  */
 package com.google.cloud.bigtable.data.v2.stub;
 
+import com.google.api.core.ApiFuture;
 import com.google.api.core.BetaApi;
 import com.google.api.core.InternalApi;
 import com.google.api.gax.batching.Batcher;
@@ -32,6 +33,7 @@ import com.google.api.gax.retrying.ExponentialRetryAlgorithm;
 import com.google.api.gax.retrying.RetryAlgorithm;
 import com.google.api.gax.retrying.RetryingExecutorWithContext;
 import com.google.api.gax.retrying.ScheduledRetryingExecutor;
+import com.google.api.gax.rpc.ApiCallContext;
 import com.google.api.gax.rpc.Callables;
 import com.google.api.gax.rpc.ClientContext;
 import com.google.api.gax.rpc.RequestParamsExtractor;
@@ -112,7 +114,16 @@ import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.protobuf.ByteString;
+import io.grpc.CallOptions;
+import io.grpc.Channel;
+import io.grpc.ClientCall;
+import io.grpc.ClientInterceptor;
+import io.grpc.ForwardingClientCall;
+import io.grpc.ForwardingClientCallListener;
+import io.grpc.Metadata;
+import io.grpc.MethodDescriptor;
 import io.opencensus.stats.Stats;
 import io.opencensus.stats.StatsRecorder;
 import io.opencensus.tags.TagKey;
@@ -122,12 +133,19 @@ import io.opencensus.tags.Tags;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Logger;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import org.threeten.bp.Duration;
+import org.threeten.bp.Instant;
 
 /**
  * The core client that converts method calls to RPCs.
@@ -253,6 +271,22 @@ public class EnhancedBigtableStub implements AutoCloseable {
                 BuiltinMetricsTracerFactory.create(builtinAttributes),
                 // Add user configured tracer
                 settings.getTracerFactory())));
+
+    // Inject RPC logging
+    InstantiatingGrpcChannelProvider transportProvider =
+        (InstantiatingGrpcChannelProvider) builder.getTransportChannelProvider();
+
+    builder.setTransportChannelProvider(
+        transportProvider
+            .toBuilder()
+            .setInterceptorProvider(
+                () -> {
+                  OutstandingRpcLogger interceptor = new OutstandingRpcLogger();
+                  interceptor.startLogging();
+                  return ImmutableList.of(interceptor);
+                })
+            .build());
+
     return builder.build();
   }
 
@@ -773,6 +807,9 @@ public class EnhancedBigtableStub implements AutoCloseable {
    */
   private UnaryCallable<ConditionalRowMutation, Boolean> createCheckAndMutateRowCallable() {
     String methodName = "CheckAndMutateRow";
+
+    LoggerChain loggerChain = new LoggerChain();
+
     UnaryCallable<CheckAndMutateRowRequest, CheckAndMutateRowResponse> base =
         GrpcRawCallableFactory.createUnaryCallable(
             GrpcCallSettings.<CheckAndMutateRowRequest, CheckAndMutateRowResponse>newBuilder()
@@ -789,18 +826,170 @@ public class EnhancedBigtableStub implements AutoCloseable {
                     })
                 .build(),
             settings.checkAndMutateRowSettings().getRetryableCodes());
+    base = loggerChain.instrument("base", base);
 
     UnaryCallable<CheckAndMutateRowRequest, CheckAndMutateRowResponse> withStatsHeaders =
         new StatsHeadersUnaryCallable<>(base);
+    withStatsHeaders = loggerChain.instrument("stats", withStatsHeaders);
 
     UnaryCallable<CheckAndMutateRowRequest, CheckAndMutateRowResponse> withBigtableTracer =
         new BigtableTracerUnaryCallable<>(withStatsHeaders);
+    withBigtableTracer = loggerChain.instrument("tracer", withBigtableTracer);
 
     UnaryCallable<CheckAndMutateRowRequest, CheckAndMutateRowResponse> retrying =
         Callables.retrying(withBigtableTracer, settings.checkAndMutateRowSettings(), clientContext);
+    retrying = loggerChain.instrument("retrying", retrying);
 
-    return createUserFacingUnaryCallable(
-        methodName, new CheckAndMutateRowCallable(retrying, requestContext));
+    UnaryCallable<ConditionalRowMutation, Boolean> wrapped =
+        new CheckAndMutateRowCallable(retrying, requestContext);
+    wrapped = loggerChain.instrument("wrapped", wrapped);
+
+    UnaryCallable<ConditionalRowMutation, Boolean> userFacing =
+        createUserFacingUnaryCallable(methodName, wrapped);
+    userFacing = loggerChain.instrument("userFacing", userFacing);
+
+    // start a background thread to monitor outstanding rpcs
+    loggerChain.startLogging();
+
+    return userFacing;
+  }
+
+  static class LoggerChain {
+    private static final Logger LOGGER = Logger.getLogger(LoggerChain.class.getName());
+    private List<UnaryRpcLogger<?, ?>> rpcLoggers = new ArrayList<>();
+
+    void startLogging() {
+      LOGGER.info(
+          "Starting to monitor outstanding rpcs for checkAndMutate on thread: "
+              + Thread.currentThread().getId());
+      Thread thread =
+          new Thread(
+              () -> {
+                while (true) {
+                  try {
+                    Thread.sleep(TimeUnit.MINUTES.toMillis(1));
+                  } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                  }
+
+                  for (UnaryRpcLogger<?, ?> rpcLogger : rpcLoggers) {
+                    rpcLogger.logStale();
+                  }
+                }
+              });
+
+      thread.setName("checkAndMutate RPC counter thread");
+      thread.setDaemon(true);
+      thread.start();
+    }
+
+    <ReqT, RespT> UnaryCallable<ReqT, RespT> instrument(
+        String label, UnaryCallable<ReqT, RespT> callable) {
+      UnaryRpcLogger<ReqT, RespT> instrumented = new UnaryRpcLogger<>(label, callable);
+      rpcLoggers.add(instrumented);
+      return instrumented;
+    }
+  }
+
+  static class UnaryRpcLogger<ReqT, RespT> extends UnaryCallable<ReqT, RespT> {
+    private static final Logger LOGGER = Logger.getLogger(SafeResponseObserver.class.getName());
+    private final String label;
+    private final UnaryCallable<ReqT, RespT> next;
+    private final ConcurrentHashMap<UUID, Instant> outstandingRpcs = new ConcurrentHashMap<>();
+
+    UnaryRpcLogger(String label, UnaryCallable<ReqT, RespT> next) {
+      this.label = label;
+      this.next = next;
+    }
+
+    @Override
+    public ApiFuture<RespT> futureCall(ReqT request, ApiCallContext context) {
+      UUID uuid = UUID.randomUUID();
+      outstandingRpcs.put(uuid, Instant.now());
+
+      ApiFuture<RespT> f = next.futureCall(request, context);
+      f.addListener(() -> outstandingRpcs.remove(uuid), MoreExecutors.directExecutor());
+      return f;
+    }
+
+    public void logStale() {
+      Instant now = Instant.now();
+      int stuck = 0;
+      for (Map.Entry<UUID, Instant> e : outstandingRpcs.entrySet()) {
+        if (Duration.between(e.getValue(), now).compareTo(Duration.ofMinutes(1)) >= 0) {
+          stuck++;
+        }
+      }
+      if (stuck > 0) {
+        LOGGER.info(String.format("[%s] Outstanding started RPCs: %d", label, stuck));
+      }
+    }
+  }
+
+  static class OutstandingRpcLogger implements ClientInterceptor {
+    private static final Logger LOGGER = Logger.getLogger(SafeResponseObserver.class.getName());
+    private static final AtomicLong channelCounter = new AtomicLong();
+    private final long channelNum;
+    private final ConcurrentHashMap<UUID, Instant> outstandingRpcs = new ConcurrentHashMap<>();
+
+    public OutstandingRpcLogger() {
+      channelNum = channelCounter.getAndIncrement();
+      LOGGER.info("injecting grpc RPC tracker for channel " + channelNum);
+    }
+
+    public void startLogging() {
+      Thread thread =
+          new Thread(
+              () -> {
+                while (true) {
+                  try {
+                    Thread.sleep(TimeUnit.MINUTES.toMillis(1));
+                  } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                  }
+
+                  Instant now = Instant.now();
+                  int stuck = 0;
+                  for (Map.Entry<UUID, Instant> e : outstandingRpcs.entrySet()) {
+                    if (Duration.between(e.getValue(), now).compareTo(Duration.ofMinutes(1)) >= 0) {
+                      stuck++;
+                    }
+                  }
+                  if (stuck > 0) {
+                    LOGGER.info(
+                            String.format("[%d] grpc Outstanding started RPCs: %d", channelNum, stuck));
+                  }
+                }
+              },
+              "grpc-outstanding RPC counter thread");
+      thread.setDaemon(true);
+      thread.start();
+    }
+
+    @Override
+    public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+        MethodDescriptor<ReqT, RespT> methodDescriptor, CallOptions callOptions, Channel channel) {
+
+      UUID uuid = UUID.randomUUID();
+      outstandingRpcs.put(uuid, Instant.now());
+      return new ForwardingClientCall.SimpleForwardingClientCall<ReqT, RespT>(
+          channel.newCall(methodDescriptor, callOptions)) {
+        @Override
+        public void start(Listener<RespT> responseListener, Metadata headers) {
+          Listener<RespT> instrumentedListener =
+              new ForwardingClientCallListener.SimpleForwardingClientCallListener<RespT>(
+                  responseListener) {
+                @Override
+                public void onClose(io.grpc.Status status, Metadata trailers) {
+                  outstandingRpcs.remove(uuid);
+
+                  super.onClose(status, trailers);
+                }
+              };
+          super.start(instrumentedListener, headers);
+        }
+      };
+    }
   }
 
   /**
