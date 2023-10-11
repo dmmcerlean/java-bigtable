@@ -927,11 +927,15 @@ public class EnhancedBigtableStub implements AutoCloseable {
   }
 
   static class InterceptedCall {
-    private final ClientCall<?,?> clientCall;
+    private final ClientCall<?, ?> clientCall;
     private final Instant startedAt;
 
-    public InterceptedCall(ClientCall<?, ?> clientCall, Instant startedAt) {
+    private final CallOptions callOptions;
+
+    public InterceptedCall(
+        ClientCall<?, ?> clientCall, CallOptions callOptions, Instant startedAt) {
       this.clientCall = clientCall;
+      this.callOptions = callOptions;
       this.startedAt = startedAt;
     }
   }
@@ -940,7 +944,8 @@ public class EnhancedBigtableStub implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(SafeResponseObserver.class.getName());
     private static final AtomicLong channelCounter = new AtomicLong();
     private final long channelNum;
-    private final ConcurrentHashMap<UUID, InterceptedCall> outstandingRpcs = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, InterceptedCall> outstandingRpcs =
+        new ConcurrentHashMap<>();
 
     public OutstandingRpcLogger() {
       channelNum = channelCounter.getAndIncrement();
@@ -965,13 +970,21 @@ public class EnhancedBigtableStub implements AutoCloseable {
                     if (callDuration.compareTo(Duration.ofMinutes(1)) >= 0) {
                       stuck++;
                     }
-                    if (callDuration.compareTo(Duration.ofMinutes(5)) >= 0 && callDuration.compareTo(Duration.ofMinutes(10)) < 0) {
-                      e.getValue().clientCall.cancel("Forcefully cancelling rpc: " + e.getKey(), null);
+                    if (callDuration.compareTo(Duration.ofMinutes(5)) >= 0
+                        && callDuration.compareTo(Duration.ofMinutes(10)) < 0) {
+                      e.getValue()
+                          .clientCall
+                          .cancel(
+                              "Forcefully cancelling rpc: "
+                                  + e.getKey()
+                                  + ", call deadline: "
+                                  + e.getValue().callOptions.getDeadline(),
+                              null);
                     }
                   }
                   if (stuck > 0) {
                     LOGGER.info(
-                            String.format("[%d] grpc Outstanding started RPCs: %d", channelNum, stuck));
+                        String.format("[%d] grpc Outstanding started RPCs: %d", channelNum, stuck));
                   }
                 }
               },
@@ -986,10 +999,9 @@ public class EnhancedBigtableStub implements AutoCloseable {
 
       final UUID uuid = UUID.randomUUID();
       ClientCall<ReqT, RespT> innerCall = channel.newCall(methodDescriptor, callOptions);
-      outstandingRpcs.put(uuid, new InterceptedCall(innerCall, Instant.now()));
+      outstandingRpcs.put(uuid, new InterceptedCall(innerCall, callOptions, Instant.now()));
 
-      return new ForwardingClientCall.SimpleForwardingClientCall<ReqT, RespT>(
-              innerCall) {
+      return new ForwardingClientCall.SimpleForwardingClientCall<ReqT, RespT>(innerCall) {
         @Override
         public void start(Listener<RespT> responseListener, Metadata headers) {
           Listener<RespT> instrumentedListener =
