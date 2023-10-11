@@ -926,11 +926,21 @@ public class EnhancedBigtableStub implements AutoCloseable {
     }
   }
 
+  static class InterceptedCall {
+    private final ClientCall<?,?> clientCall;
+    private final Instant startedAt;
+
+    public InterceptedCall(ClientCall<?, ?> clientCall, Instant startedAt) {
+      this.clientCall = clientCall;
+      this.startedAt = startedAt;
+    }
+  }
+
   static class OutstandingRpcLogger implements ClientInterceptor {
     private static final Logger LOGGER = Logger.getLogger(SafeResponseObserver.class.getName());
     private static final AtomicLong channelCounter = new AtomicLong();
     private final long channelNum;
-    private final ConcurrentHashMap<UUID, Instant> outstandingRpcs = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, InterceptedCall> outstandingRpcs = new ConcurrentHashMap<>();
 
     public OutstandingRpcLogger() {
       channelNum = channelCounter.getAndIncrement();
@@ -950,9 +960,13 @@ public class EnhancedBigtableStub implements AutoCloseable {
 
                   Instant now = Instant.now();
                   int stuck = 0;
-                  for (Map.Entry<UUID, Instant> e : outstandingRpcs.entrySet()) {
-                    if (Duration.between(e.getValue(), now).compareTo(Duration.ofMinutes(1)) >= 0) {
+                  for (Map.Entry<UUID, InterceptedCall> e : outstandingRpcs.entrySet()) {
+                    Duration callDuration = Duration.between(e.getValue().startedAt, now);
+                    if (callDuration.compareTo(Duration.ofMinutes(1)) >= 0) {
                       stuck++;
+                    }
+                    if (callDuration.compareTo(Duration.ofMinutes(5)) >= 0 && callDuration.compareTo(Duration.ofMinutes(10)) < 0) {
+                      e.getValue().clientCall.cancel("Forcefully cancelling rpc: " + e.getKey(), null);
                     }
                   }
                   if (stuck > 0) {
@@ -970,10 +984,12 @@ public class EnhancedBigtableStub implements AutoCloseable {
     public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
         MethodDescriptor<ReqT, RespT> methodDescriptor, CallOptions callOptions, Channel channel) {
 
-      UUID uuid = UUID.randomUUID();
-      outstandingRpcs.put(uuid, Instant.now());
+      final UUID uuid = UUID.randomUUID();
+      ClientCall<ReqT, RespT> innerCall = channel.newCall(methodDescriptor, callOptions);
+      outstandingRpcs.put(uuid, new InterceptedCall(innerCall, Instant.now()));
+
       return new ForwardingClientCall.SimpleForwardingClientCall<ReqT, RespT>(
-          channel.newCall(methodDescriptor, callOptions)) {
+              innerCall) {
         @Override
         public void start(Listener<RespT> responseListener, Metadata headers) {
           Listener<RespT> instrumentedListener =
