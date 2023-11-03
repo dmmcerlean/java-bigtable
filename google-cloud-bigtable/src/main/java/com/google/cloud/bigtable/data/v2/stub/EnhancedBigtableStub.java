@@ -114,6 +114,7 @@ import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.protobuf.ByteString;
 import io.grpc.CallOptions;
@@ -124,6 +125,7 @@ import io.grpc.ForwardingClientCall;
 import io.grpc.ForwardingClientCallListener;
 import io.grpc.Metadata;
 import io.grpc.MethodDescriptor;
+import io.grpc.Status;
 import io.opencensus.stats.Stats;
 import io.opencensus.stats.StatsRecorder;
 import io.opencensus.tags.TagKey;
@@ -139,6 +141,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
@@ -281,9 +286,10 @@ public class EnhancedBigtableStub implements AutoCloseable {
             .toBuilder()
             .setInterceptorProvider(
                 () -> {
-                  OutstandingRpcLogger interceptor = new OutstandingRpcLogger();
-                  interceptor.startLogging();
-                  return ImmutableList.of(interceptor);
+                  OutstandingRpcLogger outstandingRpcLogger = new OutstandingRpcLogger();
+                  outstandingRpcLogger.startLogging();
+                  WatchdogInterceptor watchdogInterceptor = new WatchdogInterceptor();
+                  return ImmutableList.of(outstandingRpcLogger, watchdogInterceptor);
                 })
             .build());
 
@@ -1015,6 +1021,74 @@ public class EnhancedBigtableStub implements AutoCloseable {
                 }
               };
           super.start(instrumentedListener, headers);
+        }
+      };
+    }
+  }
+
+  static class WatchdogInterceptor implements ClientInterceptor, Runnable {
+    private ConcurrentHashMap<ClientCall<?, ?>, Instant> outstandingCalls =
+        new ConcurrentHashMap<>();
+
+    WatchdogInterceptor() {
+
+      ScheduledExecutorService executor =
+          Executors.newScheduledThreadPool(
+              1,
+              new ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable r) {
+                  Thread thread = Executors.defaultThreadFactory().newThread(r);
+                  thread.setDaemon(true);
+                  thread.setName("watchdog interceptor");
+                  return thread;
+                }
+              });
+
+      executor.schedule(this, 1, TimeUnit.MINUTES);
+    }
+
+    @Override
+    public void run() {
+      Instant staleCutOff = Instant.now().minus(Duration.ofMinutes(5));
+      ArrayList<ClientCall<?, ?>> toRemove = Lists.newArrayList();
+
+      for (Map.Entry<ClientCall<?, ?>, Instant> entry : outstandingCalls.entrySet()) {
+        if (!entry.getValue().isAfter(staleCutOff)) {
+          continue;
+        }
+        toRemove.add(entry.getKey());
+      }
+      for (ClientCall<?, ?> clientCall : toRemove) {
+        clientCall.cancel("Cancelled by watchdog interceptor", null);
+        outstandingCalls.remove(clientCall);
+      }
+    }
+
+    @Override
+    public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
+        MethodDescriptor<ReqT, RespT> methodDescriptor, CallOptions callOptions, Channel channel) {
+      ClientCall<ReqT, RespT> clientCall = channel.newCall(methodDescriptor, callOptions);
+      // ReadRows is already watched
+      if ("ReadRows".equals(methodDescriptor.getBareMethodName())) {
+        return clientCall;
+      }
+
+      outstandingCalls.put(clientCall, Instant.now());
+
+      return new ForwardingClientCall.SimpleForwardingClientCall<ReqT, RespT>(clientCall) {
+        @Override
+        public void start(Listener<RespT> responseListener, Metadata headers) {
+          super.start(
+              new ForwardingClientCallListener.SimpleForwardingClientCallListener<RespT>(
+                  responseListener) {
+                @Override
+                public void onClose(Status status, Metadata trailers) {
+                  outstandingCalls.remove(clientCall);
+                  super.onClose(status, trailers);
+                }
+              },
+              headers);
         }
       };
     }
