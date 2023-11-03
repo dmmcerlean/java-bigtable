@@ -281,6 +281,8 @@ public class EnhancedBigtableStub implements AutoCloseable {
     InstantiatingGrpcChannelProvider transportProvider =
         (InstantiatingGrpcChannelProvider) builder.getTransportChannelProvider();
 
+    final WatchdogInterceptor watchdogInterceptor = new WatchdogInterceptor();
+
     builder.setTransportChannelProvider(
         transportProvider
             .toBuilder()
@@ -288,7 +290,6 @@ public class EnhancedBigtableStub implements AutoCloseable {
                 () -> {
                   OutstandingRpcLogger outstandingRpcLogger = new OutstandingRpcLogger();
                   outstandingRpcLogger.startLogging();
-                  WatchdogInterceptor watchdogInterceptor = new WatchdogInterceptor();
                   return ImmutableList.of(outstandingRpcLogger, watchdogInterceptor);
                 })
             .build());
@@ -1027,7 +1028,7 @@ public class EnhancedBigtableStub implements AutoCloseable {
   }
 
   static class WatchdogInterceptor implements ClientInterceptor, Runnable {
-    private ConcurrentHashMap<ClientCall<?, ?>, Instant> outstandingCalls =
+    private final ConcurrentHashMap<ClientCall<?, ?>, Instant> outstandingCalls =
         new ConcurrentHashMap<>();
 
     WatchdogInterceptor() {
