@@ -89,6 +89,7 @@ if [[ "${CURRENT_PROTO_VERSION}" != "${LATEST_PROTO_VERSION}" ]]; then
     if grep -q "sdk-platform-java-config" "${pom}"; then
       echo "Updating the pom: ${pom} to use shared-deps version: ${SHARED_DEPS_VERSION}"
       sed -i "/<artifactId>sdk-platform-java-config<\/artifactId>/,/<\/parent>/ s/<version>.*<\/version>/<version>$SHARED_DEPS_VERSION<\/version>/" "${pom}"
+      cat "${pom}"
 #      xmlstarlet ed --inplace -N x="http://maven.apache.org/POM/4.0.0" \
 #        -u "//x:project/x:parent[x:artifactId='sdk-platform-java-config']/x:version" \
 #        -v "${SHARED_DEPS_VERSION}" \
