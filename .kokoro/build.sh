@@ -27,6 +27,9 @@ source ${scriptDir}/common.sh
 mvn -version
 echo ${JOB_TYPE}
 
+sudo apt-get update
+sudo apt-get -y install libxml2-utils
+
 # Store the current Java version since the version may change when installing sdk-platform-java
 current_java_home=$JAVA_HOME
 
@@ -89,14 +92,14 @@ if [[ "${CURRENT_PROTO_VERSION}" != "${LATEST_PROTO_VERSION}" ]]; then
     fi
   done
 
-  # Print out the dependency tree for all module to ensure latest protobuf was installed
-  mvn dependency:tree
-
   mvn clean install -q -ntp \
       -DskipTests=true \
       -Dclirr.skip=true \
       -Denforcer.skip=true \
       -T 1C
+
+  # Print out the dependency tree for all module to ensure latest protobuf was installed
+  mvn dependency:tree
 fi
 
 # Reset back to the original Java version if changed
