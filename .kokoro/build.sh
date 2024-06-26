@@ -73,6 +73,11 @@ if [[ "${CURRENT_PROTO_VERSION}" != "${LATEST_PROTO_VERSION}" ]]; then
   echo "Shared-Deps Version: ${SHARED_DEPS_VERSION}"
   # sdk-platform-java
   popd
+  mvn clean install -q -ntp \
+      -DskipTests=true \
+      -Dclirr.skip=true \
+      -Denforcer.skip=true \
+      -T 1C
   # /tmp
   popd
 
@@ -89,12 +94,6 @@ if [[ "${CURRENT_PROTO_VERSION}" != "${LATEST_PROTO_VERSION}" ]]; then
         "${pom}"
     fi
   done
-
-  mvn clean install -q -ntp \
-      -DskipTests=true \
-      -Dclirr.skip=true \
-      -Denforcer.skip=true \
-      -T 1C
 
   # Print out the dependency tree for all module to ensure latest protobuf was installed
   mvn dependency:tree
