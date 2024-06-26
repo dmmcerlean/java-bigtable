@@ -94,6 +94,9 @@ if [[ "${CURRENT_PROTO_VERSION}" != "${LATEST_PROTO_VERSION}" ]]; then
       }" "${pom}"
     fi
   done
+
+  # Print out the dependency tree for all module to ensure latest protobuf was installed
+  mvn dependency:tree
 fi
 
 # Reset back to the original Java version if changed
