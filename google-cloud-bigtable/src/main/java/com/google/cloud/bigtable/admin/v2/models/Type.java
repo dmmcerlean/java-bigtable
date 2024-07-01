@@ -22,21 +22,19 @@ import com.google.auto.value.AutoValue;
 import javax.annotation.Nonnull;
 
 /**
- * Wrapper class for the {@link com.google.bigtable.admin.v2.Type} protobuf message.
+ * Wrapper interface for the {@link com.google.bigtable.admin.v2.Type} protobuf message.
  *
  * @see com.google.bigtable.admin.v2.Type
  */
 @BetaApi
-public abstract class Type {
-  private Type() {}
-
+public interface Type {
   /**
-   * This type is a marker type that allows types to be used as the input to the SUM aggregate
+   * This is a marker interface that allows types to be used as the input to the SUM aggregate
    * function.
    */
-  public abstract static class SumAggregateInput extends Type {}
+  public static interface SumAggregateInput extends Type {}
 
-  abstract com.google.bigtable.admin.v2.Type toProto();
+  com.google.bigtable.admin.v2.Type toProto();
 
   static Type fromProto(com.google.bigtable.admin.v2.Type source) {
     switch (source.getKindCase()) {
@@ -70,7 +68,7 @@ public abstract class Type {
   }
 
   /**
-   * Creates an Int64 type with a big-endian encoding. The bytes are then encoded in "raw" format.
+   * Creates an Int64 type with a big-endian encoding.
    */
   public static Int64 bigEndianInt64() {
     return Int64.create(Int64.Encoding.BigEndianBytes.create(Bytes.rawBytes()));
@@ -81,7 +79,7 @@ public abstract class Type {
     return Int64.create(encoding);
   }
 
-  /** Creates an Aggregate type with a SUM aggregator and Int64 input type. */
+  /** Creates an Aggregate type with a SUM aggregator and a big-endian Int64 input type. */
   public static Aggregate int64Sum() {
     return sum(bigEndianInt64());
   }
@@ -93,7 +91,7 @@ public abstract class Type {
 
   /** Represents a string of bytes with a specific encoding. */
   @AutoValue
-  public abstract static class Bytes extends Type {
+  public abstract static class Bytes implements Type {
     public static Bytes create(Encoding encoding) {
       return new AutoValue_Type_Bytes(encoding);
     }
@@ -113,9 +111,9 @@ public abstract class Type {
       return create(Encoding.fromProto(source.getEncoding()));
     }
 
-    public abstract static class Encoding {
+    public static interface Encoding {
 
-      abstract com.google.bigtable.admin.v2.Type.Bytes.Encoding toProto();
+      com.google.bigtable.admin.v2.Type.Bytes.Encoding toProto();
 
       static Encoding fromProto(com.google.bigtable.admin.v2.Type.Bytes.Encoding source) {
         switch (source.getEncodingCase()) {
@@ -131,7 +129,7 @@ public abstract class Type {
       }
 
       @AutoValue
-      public abstract static class Raw extends Encoding {
+      public abstract static class Raw implements Encoding {
         public static Raw create() {
           return new AutoValue_Type_Bytes_Encoding_Raw();
         }
@@ -141,7 +139,6 @@ public abstract class Type {
                 .setRaw(com.google.bigtable.admin.v2.Type.Bytes.Encoding.Raw.getDefaultInstance())
                 .build();
 
-        @Override
         com.google.bigtable.admin.v2.Type.Bytes.Encoding toProto() {
           return PROTO_INSTANCE;
         }
@@ -151,7 +148,7 @@ public abstract class Type {
 
   /** Represents a 64-bit integer with a specific encoding. */
   @AutoValue
-  public abstract static class Int64 extends SumAggregateInput {
+  public abstract static class Int64 implements SumAggregateInput {
     public static Int64 create(Encoding encoding) {
       return new AutoValue_Type_Int64(encoding);
     }
@@ -159,9 +156,9 @@ public abstract class Type {
     @Nonnull
     public abstract Encoding getEncoding();
 
-    public abstract static class Encoding {
+    public static interface Encoding {
 
-      abstract com.google.bigtable.admin.v2.Type.Int64.Encoding toProto();
+      com.google.bigtable.admin.v2.Type.Int64.Encoding toProto();
 
       static Encoding fromProto(com.google.bigtable.admin.v2.Type.Int64.Encoding source) {
         switch (source.getEncodingCase()) {
@@ -175,16 +172,16 @@ public abstract class Type {
       }
 
       @AutoValue
-      public abstract static class BigEndianBytes extends Encoding {
+      public abstract static class BigEndianBytes implements Encoding {
 
         public static BigEndianBytes create(Bytes bytes) {
           return new AutoValue_Type_Int64_Encoding_BigEndianBytes(bytes);
         }
 
+        /** Deprecated: do not use */
         @Nonnull
         public abstract Bytes getBytes();
 
-        @Override
         com.google.bigtable.admin.v2.Type.Int64.Encoding toProto() {
           com.google.bigtable.admin.v2.Type.Int64.Encoding.Builder builder =
               com.google.bigtable.admin.v2.Type.Int64.Encoding.newBuilder();
@@ -208,7 +205,7 @@ public abstract class Type {
   }
 
   @AutoValue
-  public abstract static class Raw extends Type {
+  public abstract static class Raw implements Type {
     public static Raw create() {
       return new AutoValue_Type_Raw();
     }
@@ -226,7 +223,7 @@ public abstract class Type {
    * the `input_type` or `state_type`, and reads will always return the `state_type` .
    */
   @AutoValue
-  public abstract static class Aggregate extends Type {
+  public abstract static class Aggregate implements Type {
     public static Aggregate create(Type inputType, Aggregator aggregator) {
       return new AutoValue_Type_Aggregate(inputType, aggregator);
     }
@@ -237,9 +234,9 @@ public abstract class Type {
     @Nonnull
     public abstract Aggregator getAggregator();
 
-    public abstract static class Aggregator {
+    public static interface Aggregator {
       @AutoValue
-      public abstract static class Sum extends Aggregator {
+      public abstract static class Sum implements Aggregator {
         public static Sum create() {
           return new AutoValue_Type_Aggregate_Aggregator_Sum();
         }
@@ -250,7 +247,7 @@ public abstract class Type {
         }
       }
 
-      abstract void buildTo(com.google.bigtable.admin.v2.Type.Aggregate.Builder builder);
+      void buildTo(com.google.bigtable.admin.v2.Type.Aggregate.Builder builder);
     }
 
     @Override
